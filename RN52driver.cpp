@@ -26,8 +26,11 @@
 #include <string.h>
 #include "RN52driver.h"
 #include "RN52strings.h"
+#include "Scroller.h"
 
 #define DEBUGMODE  0
+
+unsigned long cmdResponseTimeout = CMD_TIMEOUT; // Abandon command and reset if no response/no valid response received within this period.
 
 namespace RN52 {
     
@@ -118,6 +121,28 @@ namespace RN52 {
         return strncmp(buffer, cmd, strlen(cmd)) == 0;
     }
     
+    void RN52driver::abortCurrentCommand() {
+        if (isCmd(currentCommand, RN52_CMD_GET_TRACK_DATA)) {
+            scroller.complete_update();
+        }
+        currentCommand = NULL;
+        prepareDataMode();
+    }
+
+    void RN52driver::trimRightEOL() {
+        for (;;) {
+            int lastCharPos = cmdRxBufferPos - 1;
+            if (lastCharPos < 0)
+                break;
+            if (cmdRxBuffer[lastCharPos] != '\r' && cmdRxBuffer[lastCharPos] != '\n') {
+                // done trimming
+                break;
+            }
+            cmdRxBufferPos = lastCharPos;
+            cmdRxBuffer[cmdRxBufferPos] = 0;
+        }
+    }
+
     int RN52driver::parseCmdResponse(const char *data, int size)
     {
         int parsed = 0;
@@ -125,6 +150,24 @@ namespace RN52 {
             if (cmdRxBufferPos == CMD_RX_BUFFER_SIZE) {
                 onError(4, OVERFLOW);
                 return -1;
+            }
+
+            // If the incoming line is longer than CMD_RX_BUFFER_SIZE
+            // try to force it to end with \r\n
+            if (cmdRxBufferPos == CMD_RX_BUFFER_SIZE - 1) {
+                // in the last byte accept only \n
+                if (data[parsed] != '\n') {
+                    // drop any other chars
+                    parsed++;
+                    continue;
+                }
+            } else if (cmdRxBufferPos == CMD_RX_BUFFER_SIZE - 2) {
+                // in the byte before that accept \r or \n
+                if (data[parsed] != '\r' && data[parsed] != '\n') {
+                    // drop any other chars
+                    parsed++;
+                    continue;
+                }
             }
             
             cmdRxBuffer[cmdRxBufferPos++] = data[parsed++];
@@ -141,7 +184,7 @@ namespace RN52 {
                         enterCommandMode = false;
                         cmdRxBufferPos = 0;
                     } else {
-                        toSPP(cmdRxBuffer[0]);
+                        //toSPP(cmdRxBuffer[0]);
                         for (int i = 1; i < 5; i++)
                             cmdRxBuffer[i - 1] = cmdRxBuffer[i];
                         cmdRxBufferPos--;
@@ -170,14 +213,26 @@ namespace RN52 {
                     if (currentCommand == NULL) {
                         cmdRxBuffer[cmdRxBufferPos - 2] = 0;
                     } else if (isCmd(currentCommand, RN52_CMD_QUERY)) {
-                        parseQResponse(cmdRxBuffer);
                         currentCommand = NULL;
+                        if (cmdRxBufferPos != 6 || !parseQResponse(cmdRxBuffer)) {
+                            queueCommand(RN52_CMD_QUERY);
+                        }
                     } else if (isCmd(currentCommand, RN52_CMD_DETAILS)) {
-                    	if (isCmd(cmdRxBuffer, "BTA=")) {
-                    		Serial.print(cmdRxBuffer + 4);
-                    		currentCommand = NULL;
-                    	}
-                    } else if (isCmd(currentCommand, RN52_CMD_REBOOT)) {
+                        if (isCmd(cmdRxBuffer, "BTA=")) {
+                            Serial.print(cmdRxBuffer + 4);
+                            currentCommand = NULL;
+                        }
+                    } else if (isCmd(currentCommand, RN52_CMD_GET_TRACK_DATA)) {
+                        if (isCmd(cmdRxBuffer, "Title=")) {
+                            trimRightEOL();
+                            scroller.set_title(cmdRxBuffer + 6);
+                        } else if (isCmd(cmdRxBuffer, "Artist=")) {
+                            trimRightEOL();
+                            scroller.set_artist(cmdRxBuffer + 7);
+                            scroller.complete_update();
+                            currentCommand = NULL;
+                        }
+                   } else if (isCmd(currentCommand, RN52_CMD_REBOOT)) {
                         currentCommand = NULL;
                     } else {
                         // misc command (AVCRP, connect/disconnect, etc)
@@ -213,6 +268,11 @@ namespace RN52 {
                     for(int i = 1; i < commandQueuePos; i++)
                         commandQueue[i - 1] = commandQueue[i];
                     commandQueuePos--;
+                    if (isCmd(currentCommand, RN52_CMD_REBOOT)) {
+                        cmdResponseTimeout = REBOOT_TIMEOUT;
+                    } else {
+                        cmdResponseTimeout = CMD_TIMEOUT;
+                    }
                     toUART(currentCommand, strlen(currentCommand));
                 } else if (!enterDataMode){
                     enterDataMode = true;
@@ -237,7 +297,12 @@ namespace RN52 {
         return 0;
     }
     
-    void RN52driver::parseQResponse(const char data[4]) {
+    bool RN52driver::parseQResponse(const char data[4]) {
+        for (int i = 0; i < 4; i++) {
+            if (!isxdigit(data[i]))
+                return false;
+        }
+
         int profile =
         (getVal(data[0]) << 4 | getVal(data[1])) & 0x0f;
         int state =
@@ -250,6 +315,7 @@ namespace RN52 {
         sppConnected = profile & 0x02;
         a2dpConnected = profile & 0x04;
         //profHFPHSPConnected = profile & 0x08;
+        bool trackChanged = getVal(data[0]) & 0x02;
         
         bool changed = (this->state != state) || (this->profile != profile);
         //bool profilesChanged = this->profile != profile;
@@ -266,6 +332,9 @@ namespace RN52 {
             onProfileChange(SPP, sppConnected);
         if (lastA2dpConnected != a2dpConnected)
             onProfileChange(A2DP, a2dpConnected);
+        if (trackChanged)
+            get_track_data();
+        return true;
     }
     
     void RN52driver::prepareCommandMode() {
@@ -448,6 +517,11 @@ namespace RN52 {
     
     void RN52driver::print_mac() {
         queueCommand(RN52_CMD_DETAILS);
+    }
+
+    void RN52driver::get_track_data() {
+        scroller.start_update();
+        queueCommand(RN52_CMD_GET_TRACK_DATA);
     }
 
     void RN52driver::refreshState() {

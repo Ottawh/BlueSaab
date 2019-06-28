@@ -27,7 +27,7 @@
 #include "CDC.h"
 #include "MessageSender.h"
 #include "RN52handler.h"
-#include "Timer.h"
+#include "SidResource.h"
 
 #define DEBUGMODE  0
 
@@ -35,23 +35,12 @@
  * Variables:
  */
 
-MessageSender messageSender;
-extern Timer time;
-void sendCdcActiveStatus(void*);
-void sendCdcPowerdownStatus(void*);
-void *currentCdcCmd = NULL;
-volatile unsigned long cdcStatusLastSendTime = 0;            // Timer used to ensure we send the CDC status frame in a timely manner
+unsigned long cdcStatusLastSendTime = 0;                     // Timer used to ensure we send the CDC status frame in a timely manner
 unsigned long lastIcomingEventTime = 0;                      // Timer used for determening if we should treat current event as, for example, a long press of a button
 boolean cdcActive = false;                                   // True while our module, the simulated CDC, is active
-boolean sidWriteAccessWanted = false;                        // True while we want to write on SID
-volatile boolean cdcStatusResendNeeded = false;              // True if an internal operation has triggered the need to send the CDC status frame as an event
-volatile boolean cdcStatusResendDueToCdcCommand = false;     // True if the need for sending the CDC status frame was triggered by CDC_CONTROL frame (IHU)
-boolean writeTextOnDisplayTimerActive = false;               // True while we are writing custom text on SID every SID_CONTROL_TX_BASETIME interval
+boolean cdcStatusResendNeeded = false;              // True if an internal operation has triggered the need to send the CDC status frame as an event
+boolean cdcStatusResendDueToCdcCommand = false;     // True if the need for sending the CDC status frame was triggered by CDC_CONTROL frame (IHU)
 int incomingEventCounter = 0;                                // Counter for incoming events to determine when we will treat the event, for example, as a long press of a button
-int displayRequestTimerId = -1;
-int writeTextOnDisplayTimerId = -1;
-int currentNodeStatusTxTimerEvent = -1;
-int textToSidTimer = -1;
 unsigned char cdcPoweronCmd[NODE_STATUS_TX_MSG_SIZE][CAN_FRAME_LENGTH] = {
     {0x32,0x00,0x00,0x03,0x01,0x02,0x00,0x00},
     {0x42,0x00,0x00,0x22,0x00,0x00,0x00,0x00},
@@ -100,7 +89,7 @@ void CDChandler::printCanTxFrame() {
  */
 
 void CDChandler::printCanRxFrame() {
-//#if (DEBUGMODE==1)
+#if (DEBUGMODE==1)
     Serial.print(CAN_RxMsg.id,HEX);
     Serial.print(F(" Rx-> "));
     for (int i = 0; i < CAN_FRAME_LENGTH; i++) {
@@ -108,7 +97,7 @@ void CDChandler::printCanRxFrame() {
         Serial.print(" ");
     }
     Serial.println();
-//#endif
+#endif
 }
 
 /**
@@ -154,18 +143,10 @@ void CDChandler::handleRxFrame() {
                 handleSteeringWheelButtons();
                 break;
             case DISPLAY_RESOURCE_GRANT:
-                if ((cdcActive) && (CAN_RxMsg.data[0] == 0x02)) {
-                    if (CAN_RxMsg.data[1] == NODE_SID_FUNCTION_ID) {
-                        // We have been granted the right to write text to the second row on the SID"
-                        if (!writeTextOnDisplayTimerActive) {
-                            writeTextOnDisplayTimerId = time.every(SID_CONTROL_TX_BASETIME, &writeTextOnDisplayOnTime,NULL);
-                            writeTextOnDisplayTimerActive = true;
-                        }
-                    }
-                    else {
-                        // ”OK to write” = false
-                    }
-                }
+                sidResource.grantReceived(CAN_RxMsg.data);
+                break;
+            case IHU_DISPLAY_RESOURCE_REQ:
+                sidResource.ihuRequestReceived(CAN_RxMsg.data);
                 break;
             default:
                 break;
@@ -187,22 +168,19 @@ void CDChandler::handleIhuButtons() {
     switch (CAN_RxMsg.data[1]) {
         case 0x24: // CDC = ON (CD/RDM button has been pressed twice)
             cdcActive = true;
+            sidResource.activate();
             BT.bt_reconnect();
-            //sidWriteAccessWanted = true;
-            //displayRequestTimerId = time.every(SID_CONTROL_TX_BASETIME, &sendDisplayRequestOnTime,NULL);
             sendCanFrame(SOUND_REQUEST, soundCmd);
             break;
         case 0x14: // CDC = OFF (Back to Radio or Tape mode)
-            //sidWriteAccessWanted = false;
-            //time.stop(writeTextOnDisplayTimerId);
-            //writeTextOnDisplayTimerActive = false;
-            //time.stop(displayRequestTimerId);
+            sidResource.deactivate();
             BT.bt_disconnect();
             cdcActive = false;
             break;
         default:
             break;
     }
+    sidResource.requestDriverBreakthrough();
     if ((event) && (CAN_RxMsg.data[1] != 0x00)) {
         if (cdcActive) {
             switch (CAN_RxMsg.data[1]) {
@@ -243,9 +221,11 @@ void CDChandler::handleIhuButtons() {
                             break;
                         case 0x06:
                             BT.bt_disconnect();
+                            break;
                         default:
                             break;
                     }
+                    break;
                 default:
                     break;
             }
@@ -322,8 +302,6 @@ void CDChandler::sendCdcStatus(boolean event, boolean remote, boolean cdcActive)
      [7]: CD changer status; D0 = Married to the car
      */
     
-    byte discMode          = 0x05;  // Play; 0x0E can also be tried for "test mode" but might stop IHU from updating the display
-    
     unsigned char cdcGeneralStatusCmd[CAN_FRAME_LENGTH];
     cdcGeneralStatusCmd[0] = ((event ? 0x07 : 0x00) | (remote ? 0x00 : 0x01)) << 5;
     cdcGeneralStatusCmd[1] = (cdcActive ? 0xFF : 0x00);                             // Validation for presence of six discs in the magazine
@@ -344,34 +322,6 @@ void CDChandler::sendCdcStatus(boolean event, boolean remote, boolean cdcActive)
 }
 
 /**
- * Sends a request for using the SID, row 2. We may NOT start writing until we've received a grant frame with the correct function ID!
- */
-
-void CDChandler::sendDisplayRequest(boolean sidWriteAccessWanted) {
-    
-    /* Format of NODE_DISPLAY_RESOURCE_REQ frame:
-     ID: Node ID requesting to write on SID
-     [0]: Request source
-     [1]: SID object to write on; 0 = entire SID; 1 = 1st row; 2 = 2nd row
-     [2]: Request type: 1 = Engineering test; 2 = Emergency; 3 = Driver action; 4 = ECU action; 5 = Static text; 0xFF = We don't want to write on SID
-     [3]: Request source function ID
-     [4-7]: Zeroed out; not in use
-     */
-    
-    unsigned char displayRequestCmd[CAN_FRAME_LENGTH];
-    displayRequestCmd[0] = NODE_APL_ADR;
-    displayRequestCmd[1] = 0x02;
-    displayRequestCmd[2] = (sidWriteAccessWanted ? 0x05 : 0xFF);
-    displayRequestCmd[3] = NODE_SID_FUNCTION_ID;
-    displayRequestCmd[4] = 0x00;
-    displayRequestCmd[5] = 0x00;
-    displayRequestCmd[6] = 0x00;
-    displayRequestCmd[7] = 0x00;
-
-    sendCanFrame(NODE_DISPLAY_RESOURCE_REQ, displayRequestCmd);
-}
-
-/**
  * Formats and puts a frame on CAN bus
  */
 
@@ -381,54 +331,6 @@ void CDChandler::sendCanFrame(int messageId, unsigned char *msg) {
         CAN_TxMsg.data[i] = msg[i];
     }
     CAN.send(&CAN_TxMsg);
-}
-
-/**
- * Sends display request every SID_CONTROL_TX_BASETIME interval
- */
-
-void sendDisplayRequestOnTime(void*) {
-    CDC.sendDisplayRequest(sidWriteAccessWanted);
-}
-
-/**
- * Writes provided text every SID_CONTROL_TX_BASETIME interval
- */
-
-void writeTextOnDisplayOnTime(void*) {
-    CDC.writeTextOnDisplay(MODULE_NAME);
-}
-
-/**
- * Formats provided text for writing on the SID. This function assumes that we have been granted write access. Do not call it if we haven't!
- * Note: the character set used by the SID is slightly nonstandard. "Normal" characters should work fine.
- */
-
-void CDChandler::writeTextOnDisplay(const char textIn[]) {
-
-    if (!textIn) {
-        return;
-    }
-    // Copy the provided string and make sure we have a new array of the correct length
-    char textToSid[15];
-    int i, m, n;
-    n = strlen(textIn);
-    n = n > 12 ? 12 : n;      // 12 is the number of characters SID can display on each row; anything beyond 12 is going to be zeroed out
-    for (i = 0; i < n; i++) {
-        textToSid[i] = textIn[i];
-    }
-    for (i = n; i < 15; i++) {
-        textToSid[i] = 0;
-    }
-    
-    unsigned char sidMessageGroup[3][CAN_FRAME_LENGTH] = {
-        {0x42,0x96,0x02,textToSid[0],textToSid[1],textToSid[2],textToSid[3],textToSid[4]},
-        {0x01,0x96,0x02,textToSid[5],textToSid[6],textToSid[7],textToSid[8],textToSid[9]},
-        {0x00,0x96,0x02,textToSid[10],textToSid[11],textToSid[12],textToSid[13],textToSid[14]}
-    };
-    
-    messageSender.sendCanMessage(NODE_WRITE_TEXT_ON_DISPLAY,sidMessageGroup,3,10);
-
 }
 
 /**
@@ -473,6 +375,7 @@ void CDChandler::checkCanEvent(int frameElement) {
                         default:
                             break;
                     }
+                    break;
                 default:
                     break;
             }

@@ -27,6 +27,8 @@
 
 #include "RN52configuration.h"
 
+extern unsigned long cmdResponseTimeout; // Abandon command and reset if no response/no valid response received within this period.
+
 namespace RN52 {
     
     class RN52driver {
@@ -60,26 +62,20 @@ namespace RN52 {
         void set_pair_timeout();
         void reboot();
         void print_mac();
+        void get_track_data();
         void visible(bool visible);
         int sendAVCRP(AVCRP cmd);
         const char *currentCommand;
         
+        Mode getMode() { return mode; }
+
     protected:
         void refreshState();
         int queueCommand(const char *cmd);
         int getQueueSize() { 
           return (commandQueuePos);
         }
-        void abortCurrentCommand() {
-            currentCommand = NULL;
-            mode = DATA;
-            cmdRxBufferPos = 0;
-            enterDataMode = false;
-            if (commandQueuePos > 0) {
-                // there's outgoing command requests (yet or again)
-                prepareCommandMode();
-            }
-        }
+        void abortCurrentCommand();
         
     private:
         Mode mode;
@@ -102,7 +98,8 @@ namespace RN52 {
         void prepareCommandMode();
         void prepareDataMode();
         int parseCmdResponse(const char *data, int size);
-        void parseQResponse(const char data[4]);
+        bool parseQResponse(const char data[4]);
+        void trimRightEOL();
         
         virtual void onStateChange(int state, int profile) {};
         virtual void onProfileChange(BtProfile profile, bool connected) {};

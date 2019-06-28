@@ -58,3 +58,5 @@ void MessageSender::sendCanMessage(int frameId, unsigned char frames[][CAN_FRAME
         }
     }
 }
+
+MessageSender messageSender;

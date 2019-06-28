@@ -45,8 +45,6 @@ const int BT_PWREN_PIN = 9;                 // RN52 Power enable pin
 const int UART_TX_PIN = 5;                  // UART Tx
 const int UART_RX_PIN = 6;                  // UART Rx
 
-const unsigned long cmdResponseTimeout = CMD_TIMEOUT; // Abandon command and reset if no response/no valid response received within this period.
-
 
 // extend the RN52driver to implement callbacks and hardware interface
 class RN52impl : public RN52::RN52driver {

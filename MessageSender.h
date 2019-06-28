@@ -47,5 +47,6 @@ public:
     void sendCanMessage(int frameId, unsigned char frames[][CAN_FRAME_LENGTH], int frameCount, unsigned long interval);
 };
 
+extern MessageSender messageSender;
 
 #endif

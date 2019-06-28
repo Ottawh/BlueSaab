@@ -46,7 +46,7 @@
 #define RN52_SET_DEVICE_NAME        "SN,BlueSaab\r"     // Broadcasted and shown in audio source's settigns
 #define RN52_SET_BAUDRATE_9600      "SU,01\r"           // Enables serial communications on RN52 @ 9600bps
 #define RN52_SET_MAXVOL             "SS,0F\r"           // Sets the volume gain to MAX level 15 (default 11)
-#define RN52_SET_EXTENDED_FEATURES  "S%,0084\r"         // Discoverable on startup; Disable system tones
+#define RN52_SET_EXTENDED_FEATURES  "S%,1084\r"         // Enable track change event; Discoverable on startup; Disable system tones
 
 
 // AVRCP commands

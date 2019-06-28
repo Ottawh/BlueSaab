@@ -34,6 +34,7 @@
 void RN52impl::readFromUART() {
     while (softSerial.available()) {
         char c = softSerial.read();
+        //Serial.print(c);
         fromUART(c);
 //        if (currentCommand) {
         cmdResponseDeadline = millis() + cmdResponseTimeout;
@@ -47,8 +48,10 @@ void RN52impl::readFromUART() {
  */
 
 void RN52impl::toUART(const char* c, int len){
-    for(int i = 0; i < len; i++)
+    for(int i = 0; i < len; i++) {
         softSerial.write(c[i]);
+        //Serial.print(c[i]);
+    }
 };
 
 void RN52impl::fromSPP(const char* c, int len){
@@ -98,7 +101,7 @@ void RN52impl::onProfileChange(BtProfile profile, bool connected) {
 void RN52impl::update() {
     readFromUART();
     if (digitalRead(BT_EVENT_INDICATOR_PIN) == 0) {
-        if ((millis() - lastEventIndicatorPinStateChange) > 100) {
+        if (getMode()==DATA && (millis() - lastEventIndicatorPinStateChange) > 100) {
             lastEventIndicatorPinStateChange = millis();
             onGPIO2();
 #if (DEBUGMODE==1)
@@ -173,7 +176,7 @@ void RN52impl::initialize() {
             configRN52postEnable = true;
             break;
         case 197 ... 213:                           // PCB v5.1 (100K/25K Ohm network)
-            Serial.println(F("Hardware version: v5.1"));
+            Serial.println(F("Hardware version: v5.1/v5.3"));
             digitalWrite(SN_XCEIVER_RS_PIN,LOW);    // This pin needs to be pulled low, otherwise SN65HVD251D CAN transciever goes into sleep mode
             digitalWrite(BT_PWREN_PIN,HIGH);        // RN52 will not be restartable if rebooted with PWREN low. No point in pulling low again. According to RN52 DS70005120A p14 (section 2.5), cannot power down vreg.
             // Need to add 555 stuff?
@@ -207,3 +210,4 @@ void RN52impl::processCmdQueue() {
         update();
     } while (getQueueSize() || currentCommand != NULL); //FIXME: fails if only 1 cmd in the queue to start.
 }
+
